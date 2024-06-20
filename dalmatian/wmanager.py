@@ -818,12 +818,16 @@ class WorkspaceManager(object):
             print('Fetching sample status ...')
             samples_df = self.get_samples()
             if len(np.intersect1d(columns, samples_df.columns))>0:
-                incomplete_df = samples_df[samples_df[columns].isnull().any(axis=1)]
+                incomplete_df = samples_df[(samples_df[columns] == "").any(axis=1)]
+                print(f"Number of incomplete samples: {incomplete_df.shape[0]}")
             else:
                 incomplete_df = pd.DataFrame(index=samples_df.index, columns=columns)
+                print('No attributes to patch.')
 
             # get workflow status for all submissions
             sample_status_df = self.get_sample_status(reference)
+
+            incomplete_df = incomplete_df.loc[sample_status_df.index]
 
             # make sure successful workflows were all written to database
             error_ix = incomplete_df.loc[sample_status_df.loc[incomplete_df.index, 'status'] == 'Succeeded'].index
@@ -842,7 +846,7 @@ class WorkspaceManager(object):
                     metadata = self.get_workflow_metadata(sample_status_df.loc[sample_id, 'submission_id'], sample_status_df.loc[sample_id, 'workflow_id'])
                     if 'outputs' in metadata and len(metadata['outputs']) != 0 and not dry_run:
                         attr = {output_map[k.split('.')[-1]]:t for k,t in metadata['outputs'].items()}
-                        self.update_sample_attributes(sample_id, attr)
+                        self.update_sample_attributes(sample_id=sample_id, attrs=attr)
                     else:
                         for task in metadata['calls']:
                             if 'outputs' in metadata['calls'][task][-1]:
@@ -852,7 +856,7 @@ class WorkspaceManager(object):
                                         # write to attributes
                                         if not dry_run:
                                             attr = {output_map[i]:j for i,j in metadata['calls'][task][-1]['outputs'].items()}
-                                            self.update_sample_attributes(sample_id, attr)
+                                            self.update_sample_attributes(sample_id=sample_id, attrs=attr)
                                         task_counts[task.split('.')[-1]] += 1
                 except KeyError as e:
                     raise KeyError(f"No sample {sample_id} in this submission") from e
@@ -863,11 +867,37 @@ class WorkspaceManager(object):
             for i,j in task_counts.items():
                 print(f'Samples patched for "{i}": {j}')
 
+        elif entity == 'samples_in_sample_set':
+            print('Fetching sample set status ...')
+            samples_df = self.get_samples()
+            sample_set_df = self.get_sample_sets()
+            # get workflow status for all submissions
+            sample_set_status_df = self.get_sample_set_status(reference)
+
+            sample_set_df = sample_set_df.explode('samples').reset_index().set_index("samples")
+
+            # any sample sets with empty attributes for configuration
+            incomplete_df = samples_df.loc[sample_set_status_df.index, columns]
+            incomplete_df = incomplete_df[(incomplete_df == "").any(axis=1)]
+
+            # sample sets with successful jobs
+            error_ix = incomplete_df[sample_set_status_df.loc[incomplete_df.index, 'status'] == 'Succeeded'].index
+            if np.any(error_ix):
+                print(f"Attributes from {len(error_ix)} successful jobs were not written to database.")
+                print('Patching attributes with outputs from latest successful run.')
+                for n,sample_set_id in enumerate(incomplete_df.index, 1):
+                    print(f"\r  * Patching sample set {n}/{incomplete_df.shape[0]}", end='')
+                    metadata = self.get_workflow_metadata(sample_set_status_df.loc[sample_set_id, 'submission_id'], sample_set_status_df.loc[sample_set_id, 'workflow_id'])
+                    if 'outputs' in metadata and len(metadata['outputs'])!=0 and not dry_run:
+                        attr = {output_map[k.split('.')[-1]]:t for k,t in metadata['outputs'].items()}
+                        self.update_sample_attributes(sample_id=sample_set_id, attrs=attr)
+                print()
+
         elif entity == 'sample_set':
             print('Fetching sample set status ...')
             sample_set_df = self.get_sample_sets()
             # get workflow status for all submissions
-            sample_set_status_df = self.get_sample_set_status(configuration)
+            sample_set_status_df = self.get_sample_set_status(reference)
 
             # any sample sets with empty attributes for configuration
             incomplete_df = sample_set_df.loc[sample_set_status_df.index, columns]
@@ -886,6 +916,7 @@ class WorkspaceManager(object):
                         attr = {output_map[k.split('.')[-1]]:t for k,t in metadata['outputs'].items()}
                         self.update_sample_set_attributes(sample_set_id, attr)
                 print()
+
         print(f"Completed patching {entity} attributes in {self.namespace}/{self.workspace}")
 
 
